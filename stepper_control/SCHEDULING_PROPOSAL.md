@@ -1,6 +1,7 @@
 # Proposal: scheduled feed rate for the stepper feeder
 
-Status: **proposal for review, no code yet.**
+Status: **implemented** (see README.md). Decisions below were confirmed by the owner; sections that
+differ from what was built are noted in "Decisions".
 Baseline reviewed: `sandpiper-toolchain/feeder` @ `6056510`, `stepper_control/` (`boot.py`, `stepper.py`, `code.py`).
 This repo (`ericbarefoot/feeder`) does not yet contain `stepper_control/`; step 0 below is to bring it in.
 
@@ -109,7 +110,15 @@ The Pico stays a simple, safe actuator. The PC owns time and the schedule.
 2. Host scheduler + schedule format + logging. Tests with fake transport.
 3. Pi 4 packaging (`systemd` unit, `by-id` port setup) and docs; update `stepper_control/README.md`.
 
-## Open questions
+## Decisions (from review)
+
+* Encoder switch = motor on/off, encoder rotation = speed. Button B (direction) is kept; button A is dropped.
+* Button C = MANUAL/AUTO toggle, shown on the OLED. Exit-program is serial `stop` only.
+* Schedules require a calibration (`grams_per_rev`) and show both rps and g/min.
+* Link loss stops the motor.
+* Not built: acceleration ramping, direction reversal in schedules (can be added later).
+
+## Open questions (original, now answered)
 
 1. **"Selector knobs":** I assumed the encoder plus buttons A/B/C. Is there also a rate-selector pot or switch I should account for?
 2. **Button C:** OK to repurpose it from "exit program" to "mode toggle"?

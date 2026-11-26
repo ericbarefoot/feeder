@@ -2,7 +2,7 @@
 
 > **Note:** This README was generated with AI assistance. While it reflects the actual code and hardware used in this project, some details (library versions, port names, wiring notes) may be inaccurate or become outdated. Verify against the source files and your hardware before following any instructions.
 
-A CircuitPython firmware package for the Raspberry Pi Pico that drives a laboratory sediment feeder. A stepper motor controls a hopper/auger mechanism to dispense sediment at a programmable, adjustable rate. Speed and direction can be set manually via a rotary encoder and hardware buttons, or remotely from a PC over USB serial.
+A CircuitPython firmware package for the Raspberry Pi Pico that drives a laboratory sediment feeder. A stepper motor controls a hopper/auger mechanism to dispense sediment at a programmable, adjustable rate. Speed and direction can be set manually via a rotary encoder and buttons (**MANUAL** mode), or automatically from a scheduler running on a connected PC such as a Raspberry Pi 4 (**AUTO** mode).
 
 ---
 
@@ -15,7 +15,7 @@ A CircuitPython firmware package for the Raspberry Pi Pico that drives a laborat
 | Stepper motor driver | A4988, DRV8825, or similar | Must expose STEP, DIR, and ENA pins |
 | [Adafruit I2C Rotary Encoder Breakout](https://www.adafruit.com/product/4991) | Seesaw-based encoder with button | Product ID 4991, I2C addr `0x36` |
 | SSD1306 OLED display | 128×64 monochrome, I2C | I2C addr `0x3D` |
-| 3× momentary push buttons | Through-hole or panel-mount | Pulled down internally via Pico GPIO |
+| 2× momentary push buttons (B, C) | Through-hole or panel-mount | Pulled down internally via Pico GPIO |
 
 ---
 
@@ -25,10 +25,10 @@ A CircuitPython firmware package for the Raspberry Pi Pico that drives a laborat
 |---|---|
 | GP4 (SDA) | I2C data — shared bus for OLED and encoder |
 | GP5 (SCL) | I2C clock — shared bus for OLED and encoder |
-| GP8 | Button C — stop/exit program |
+| GP8 | Button C — toggle MANUAL / AUTO mode |
 | GP9 | OLED reset |
 | GP10 | Button B — reverse motor direction |
-| GP15 | Button A — toggle motor enable |
+| GP15 | Button A — unused (may be left unwired) |
 | GP18 | Stepper STEP (PWM output) |
 | GP19 | Stepper DIR |
 | GP22 | Stepper ENA |
@@ -70,37 +70,92 @@ The following are built into CircuitPython and require no separate install: `pwm
 |---|---|
 | `boot.py` | Runs at power-on; enables dual USB CDC endpoints (console + data) |
 | `stepper.py` | `Stepper` class — low-level motor control via PWM and GPIO |
-| `code.py` | Main application — display, encoder, buttons, serial command loop |
-
----
+| `controller.py` | Hardware-free logic: modes, speed setpoint, serial protocol, link-loss watchdog |
+| `code.py` | Main application — encoder, buttons, OLED, serial; glue between hardware and `controller.py` |
+| `host/` | PC-side scheduler (`feeder_host`), example schedule, `systemd` unit |
+| `tests/` | `pytest` tests for the controller, the schedule and the scheduler end-to-end |
 
 ## Getting Started
 
 1. Wire up the hardware per the pin table above.
 2. Flash CircuitPython and copy the `lib/` folder to the Pico.
-3. Copy `boot.py`, `stepper.py`, and `code.py` to the root of the Pico (`CIRCUITPY` drive).
+3. Copy `boot.py`, `stepper.py`, `controller.py`, and `code.py` to the root of the Pico (`CIRCUITPY` drive).
 4. The Pico will reboot and start the feeder firmware automatically.
 
-The OLED will show **"Feeder initialized."** briefly, then display live status:
+The OLED shows live status, starting in MANUAL with the motor stopped:
 
 ```
-speed: 0.080 Hz
-motor is: OFF
-direction is: CW
-enable pin is: ON
+MANUAL
+speed: 0.080 rps
+motor: OFF
+dir: CW
+knob control
 ```
 
 ---
 
-## Manual Controls
+## Operating modes and controls
 
-| Control | Action |
-|---|---|
-| Rotate encoder knob | Increase / decrease motor speed |
-| Press encoder knob | Toggle motor start / stop |
-| Button A (GP15) | Toggle motor enable (releases coil torque when OFF) |
-| Button B (GP10) | Reverse motor direction (CW ↔ CCW) |
-| Button C (GP8) | Exit the program (stops motor cleanly) |
+The OLED shows the current mode in large text (`MANUAL` or `AUTO`), plus speed (rps), motor state, direction and control source.
+
+| Control | MANUAL | AUTO |
+|---|---|---|
+| Rotate encoder | change speed (0.02 rps per detent) | **take over**: drop to MANUAL, motor stopped |
+| Press encoder | motor start / stop | **take over**: drop to MANUAL, motor stopped |
+| Button B (GP10) | reverse direction | reverse direction |
+| Button C (GP8) | switch to AUTO (motor stopped) | switch to MANUAL (motor stopped) |
+
+* The motor is always **stopped** when the mode changes, so nothing starts unexpectedly.
+* In AUTO the speed comes from the PC. Any command from the PC is a heartbeat. If none arrives for 10 s (`AUTO_TIMEOUT_S` in `code.py`) the motor **stops**, the Pico returns to MANUAL, and the OLED shows `LINK LOST - STOPPED`. Unplugging the USB cable therefore stops the feeder.
+* The slowest achievable speed is `10 Hz / steps_per_rev` (0.025 rps at 400 steps/rev). Requests between 0 and that floor are rejected by the PC protocol; the encoder steps from 0 straight to the floor.
+* Button C no longer exits the program. Send `stop` over serial to do that.
+
+---
+
+## Scheduled feeding from a PC
+
+```
+cd stepper_control/host
+pip install -r requirements.txt
+python -m feeder_host check schedule.example.toml          # validate and print the plan
+python -m feeder_host run schedule.example.toml \
+    --port /dev/serial/by-id/<pico>-if02 --csv ~/feed-log.csv
+```
+
+1. On the box, press **button C** to switch to AUTO (or let the scheduler request it with `mode=auto`).
+2. The scheduler walks through the schedule, sending the rate for each segment and a heartbeat every second, and prints a readout in both rps and g/min:
+   `00:01:05 seg 2/3 steady     cmd 0.0625 rps (12.000 g/min) | pico AUTO running 0.0625 rps`
+3. At the end (or on Ctrl-C) it sends `rate=0` and `mode=manual`, handing control back to the knob, stopped.
+4. If the operator uses the encoder during a run, the scheduler notices (`mode` is no longer AUTO), logs it and exits; it never takes control back by itself.
+
+### Schedule file (TOML)
+
+```toml
+[calibration]
+grams_per_rev = 3.2        # required: measured grams per auger revolution
+
+[[segment]]
+label = "steady"
+duration = "1h30m"         # 90, "30s", "10m", "1h30m", ...
+rate_g_per_min = 12.0      # or rate_rps = 0.0625; rate_rps = 0 stops the motor
+
+[repeat]
+count = 1                  # 0 = loop until stopped
+```
+
+`rps = g_per_min / 60 / grams_per_rev`. Segment rates above `--max-rps` (default 2.0) are rejected when the file is loaded.
+
+### Running on a Raspberry Pi at boot
+
+Use the stable port name from `ls /dev/serial/by-id/` (the **data** port is the `-if02` one; `ttyACM0/1` order is not guaranteed). `host/feeder-scheduler.service` is a `systemd` template.
+
+### Tests
+
+Run from the **repository root** (running pytest inside `stepper_control/` makes the firmware `code.py` shadow Python's `code` module):
+
+```
+python -m pytest stepper_control/tests
+```
 
 ---
 
@@ -157,45 +212,31 @@ ls /dev/tty.usbmodem*
 
 ---
 
-## Remote Control via USB Serial
+## Serial protocol (USB data port)
 
-The Pico exposes two USB serial ports when connected to a PC:
+Commands go to the **data** port, not the console, which is left free for debug output. One ASCII line in, one reply line out.
 
-- **Console port** — receives commands and prints debug output.
-- **Data port** — returns telemetry responses to `get:` queries.
+| Command | Reply | Notes |
+|---|---|---|
+| `ping`, `hb` | `ok` | link check / heartbeat |
+| `mode=auto`, `mode=manual` | `ok mode=...` | motor is stopped on every switch |
+| `rate=<rps>` | `ok` | AUTO only; `0` stops; `err range` outside [floor, max] |
+| `get:status` | `status mode=AUTO running=1 rps=0.2500 dir=-1 link=ok` | |
+| `speed=<rps>`, `toggle` | `ok` | MANUAL only (legacy) |
+| `switch_direction` | `ok` | |
+| `get:speed`, `get:direction`, `get:running`, `get:mode` | value | |
+| `stop` | `bye` | stop the motor and exit the program |
 
-Send commands as plain text lines (terminated with `\n`) to the **console port**.
+Errors reply `err <reason>` (`empty`, `unknown`, `bad_number`, `bad_mode`, `range`, `not_auto`, `not_manual`). The old `enable` / `disable` commands were removed along with button A.
 
-### Commands
-
-| Command | Description |
-|---|---|
-| `speed=<float>` | Set motor speed in rotations per second (e.g. `speed=0.5`) |
-| `toggle` | Start or stop the motor |
-| `switch_direction` | Reverse motor direction |
-| `enable` | Enable motor driver |
-| `disable` | Disable motor driver (releases torque) |
-| `get:speed` | Query current speed (RPS) — response on data port |
-| `get:direction` | Query direction (`-1`=CW, `1`=CCW) — response on data port |
-| `get:enabled` | Query enable state (`True`/`False`) — response on data port |
-| `get:running` | Query running state (`True`/`False`) — response on data port |
-| `stop` | Exit the program |
-
-### Example (Python on PC)
+Quick manual test with pyserial:
 
 ```python
-import serial, time
-
-# Adjust port names for your OS (e.g. 'COM3' on Windows, '/dev/ttyACM0' on Linux)
-console = serial.Serial('/dev/ttyACM0', timeout=1)
-dataport = serial.Serial('/dev/ttyACM1', timeout=1)
-
-console.write(b'speed=0.25\n')   # set 0.25 RPS
-time.sleep(0.1)
-console.write(b'toggle\n')       # start motor
-
-console.write(b'get:speed\n')
-print(dataport.readline())       # b'0.25\n'
+import serial
+d = serial.Serial('/dev/ttyACM1', timeout=1)   # the data port
+d.write(b'mode=auto\n'); print(d.readline())
+d.write(b'rate=0.25\n'); print(d.readline())
+d.write(b'get:status\n'); print(d.readline())
 ```
 
 ---

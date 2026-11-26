@@ -1,0 +1,14 @@
+# Install: sudo cp feeder-scheduler.service /etc/systemd/system/ && sudo systemctl enable --now feeder-scheduler
+# Edit User, paths and the by-id port (ls /dev/serial/by-id/ ; use the DATA port, usually ...-if02).
+[Unit]
+Description=Feeder schedule runner
+After=multi-user.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/feeder/stepper_control/host
+ExecStart=/home/pi/feeder-env/bin/python -m feeder_host run schedule.toml --port /dev/serial/by-id/CHANGE-ME-if02 --csv /home/pi/feeder-log.csv
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

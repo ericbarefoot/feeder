@@ -1,0 +1,24 @@
+# Example feed schedule. Check it with:  python -m feeder_host check schedule.example.toml
+
+[calibration]
+# Measured grams of material delivered per auger revolution (required).
+# Weigh the output of e.g. 20 revolutions and divide by 20.
+grams_per_rev = 3.2
+
+[[segment]]
+label = "ramp-up"
+duration = "10m"
+rate_rps = 0.10          # specify either rate_rps ...
+
+[[segment]]
+label = "steady"
+duration = "1h30m"
+rate_g_per_min = 12.0    # ... or rate_g_per_min (converted with grams_per_rev)
+
+[[segment]]
+label = "pause"
+duration = "5m"
+rate_rps = 0             # 0 stops the motor
+
+[repeat]
+count = 1                # how many times to run the segment list; 0 = loop forever
